@@ -9,13 +9,14 @@ import Data.Either (Either(..))
 import Data.Foldable (find, all)
 import Data.Foreign (F, Foreign, ForeignError(..), parseJSON, toForeign, readArray,
                      readString, isUndefined, isNull, readBoolean, readChar, readInt,
-                     readNumber)
+                     readNumber, mkForeignErrors)
 import Data.Foreign.Index (prop, (!), errorAt)
 import Data.Function (on)
 import Data.Generic (class Generic, GenericSignature(..), GenericSpine(..), toSpine,
                      toSignature, fromSpine)
 import Data.List as L
 import Data.Maybe (Maybe(..))
+import Data.NonEmpty (NonEmpty(..), singleton)
 import Data.Nullable (toNullable)
 import Data.StrMap as S
 import Data.Traversable (for)
@@ -92,7 +93,7 @@ readGeneric { sumEncoding
       pf <- f ! label
       case go (prop.recValue unit) pf of
         Right sp -> pure { recLabel: label, recValue: const sp }
-        Left err -> Left $ errorAt label err
+        Left e@(NonEmpty err _) -> Left (e <> singleton (errorAt label err))
     pure (SRecord fs)
   go (SigProd _ [{ sigConstructor: tag, sigValues: [sig] }]) f | unwrapNewtypes = do
     sp <- go (sig unit) f
@@ -109,18 +110,18 @@ readGeneric { sumEncoding
         x <- go (_1 unit) a
         y <- go (_2 unit) b
         pure $ SProd "Data.Tuple.Tuple" [\_ -> x, \_ -> y]
-      _ -> Left (TypeMismatch ["array of length 2"] "array")
+      _ -> Left (singleton (TypeMismatch ["array of length 2"] "array"))
   go (SigProd _ alts) f | untagEnums && all (\a -> length a.sigValues == 0) alts = do
     tag <- readString f
     case find (\alt -> (constructorTagModifier alt.sigConstructor) == tag) alts of
-      Nothing -> Left (TypeMismatch (map (constructorTagModifier <<< _.sigConstructor) alts) tag)
+      Nothing -> Left $ singleton (TypeMismatch (map (constructorTagModifier <<< _.sigConstructor) alts) tag)
       Just { sigConstructor } -> pure (SProd sigConstructor [])
   go (SigProd _ alts) f =
     case sumEncoding of
       TaggedObject { tagFieldName, contentsFieldName } -> do
         tag <- prop tagFieldName f >>= readString
         case find (\alt -> constructorTagModifier alt.sigConstructor == tag) alts of
-          Nothing -> Left (TypeMismatch (map (constructorTagModifier <<< _.sigConstructor) alts) tag)
+          Nothing -> Left $ singleton (TypeMismatch (map (constructorTagModifier <<< _.sigConstructor) alts) tag)
           Just { sigConstructor, sigValues: [] } -> pure (SProd sigConstructor [])
           Just { sigConstructor, sigValues: [sig] } | unwrapSingleArgumentConstructors -> do
             val <- prop contentsFieldName f
