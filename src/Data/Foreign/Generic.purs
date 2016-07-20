@@ -5,6 +5,7 @@ import Prelude
 import Control.Bind ((>=>))
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrow)
 import Data.Array (zipWith, zipWithA, sortBy, length)
+import Data.Array.Partial (tail, head)
 import Data.Either (Either(..))
 import Data.Foldable (find, all)
 import Data.Foreign (F, Foreign, ForeignError(..), parseJSON, toForeign, readArray,
@@ -16,11 +17,12 @@ import Data.Generic (class Generic, GenericSignature(..), GenericSpine(..), toSp
                      toSignature, fromSpine)
 import Data.List as L
 import Data.Maybe (Maybe(..))
-import Data.NonEmpty (NonEmpty(..), singleton)
+import Data.NonEmpty (NonEmpty(..), singleton, (:|))
 import Data.Nullable (toNullable)
 import Data.StrMap as S
 import Data.Traversable (for)
 import Data.Tuple (Tuple(..))
+import Partial.Unsafe (unsafePartial)
 import Global.Unsafe (unsafeStringify)
 import Type.Proxy (Proxy(..))
 
@@ -110,24 +112,26 @@ readGeneric { sumEncoding
         x <- go (_1 unit) a
         y <- go (_2 unit) b
         pure $ SProd "Data.Tuple.Tuple" [\_ -> x, \_ -> y]
-      _ -> Left (singleton (TypeMismatch ["array of length 2"] "array"))
-  go (SigProd _ alts) f | untagEnums && all (\a -> length a.sigValues == 0) alts = do
+      _ -> Left (singleton (TypeMismatch "array of length 2" "array"))
+  go (SigProd sigName alts) f | untagEnums && all (\a -> length a.sigValues == 0) alts = do
     tag <- readString f
-    case find (\alt -> (constructorTagModifier alt.sigConstructor) == tag) alts of
-      Nothing -> Left $ singleton (TypeMismatch (map (constructorTagModifier <<< _.sigConstructor) alts) tag)
-      Just { sigConstructor } -> pure (SProd sigConstructor [])
-  go (SigProd _ alts) f =
+    case find (\alt -> (constructorTagModifier alt.sigConstructor) == tag) alts, alts of
+      Nothing, [] -> Left $ singleton (TypeMismatch sigName tag)
+      Nothing, _ -> Left $ map ((flip TypeMismatch) tag <<< constructorTagModifier <<< _.sigConstructor) (unsafePartial (head alts) :| unsafePartial (tail alts))
+      Just { sigConstructor }, _ -> pure (SProd sigConstructor [])
+  go (SigProd sigName alts) f =
     case sumEncoding of
       TaggedObject { tagFieldName, contentsFieldName } -> do
         tag <- prop tagFieldName f >>= readString
-        case find (\alt -> constructorTagModifier alt.sigConstructor == tag) alts of
-          Nothing -> Left $ singleton (TypeMismatch (map (constructorTagModifier <<< _.sigConstructor) alts) tag)
-          Just { sigConstructor, sigValues: [] } -> pure (SProd sigConstructor [])
-          Just { sigConstructor, sigValues: [sig] } | unwrapSingleArgumentConstructors -> do
+        case find (\alt -> constructorTagModifier alt.sigConstructor == tag) alts, alts of
+          Nothing, [] -> Left $ singleton (TypeMismatch sigName tag)
+          Nothing, _ -> Left $ map ((flip TypeMismatch) tag <<< constructorTagModifier <<< _.sigConstructor) (unsafePartial (head alts) :| unsafePartial (tail alts))
+          Just { sigConstructor, sigValues: [] }, _ -> pure (SProd sigConstructor [])
+          Just { sigConstructor, sigValues: [sig] }, _ | unwrapSingleArgumentConstructors -> do
             val <- prop contentsFieldName f
             sp <- go (sig unit) val
             pure (SProd sigConstructor [\_ -> sp])
-          Just { sigConstructor, sigValues } -> do
+          Just { sigConstructor, sigValues }, _ -> do
             vals <- prop contentsFieldName f >>= readArray
             sps <- zipWithA (\k -> go (k unit)) sigValues vals
             pure (SProd sigConstructor (map const sps))
